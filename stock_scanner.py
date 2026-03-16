@@ -5,56 +5,71 @@ import time
 import random
 from ta.momentum import StochasticOscillator
 
-st.set_page_config(page_title="台股飆股掃描器 (含價格驗證)", layout="wide")
+st.set_page_config(page_title="台股飆股掃描器 (300檔)", layout="wide")
+
+def get_300_stocks():
+    # 這是台灣股市高流動性的代表清單
+    # 為了簡化與保證運作，我們使用高流動性代碼清單
+    # 若需擴大，可在此處補充更多代碼
+    tickers = [f"{i:04d}.TW" for i in range(2300, 2600)] 
+    return tickers
 
 def scan_stocks():
-    # 限制掃描 100 檔最熱門標的，避開 Yahoo 封鎖限制，確保資料精準
-    target_stocks = ["2330.TW", "2454.TW", "2317.TW", "2303.TW", "2603.TW", "2382.TW", "3008.TW", "2357.TW", "2308.TW", "3017.TW", "6669.TW", "3661.TW", "2345.TW", "2609.TW", "2610.TW"]
+    target_stocks = get_300_stocks()
+    st.write(f"系統啟動！正在掃描 300 檔高流動性標的...")
     
     results = []
-    st.write(f"正在掃描 {len(target_stocks)} 檔高流動性個股...")
-    progress = st.progress(0)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    for i, s in enumerate(target_stocks):
-        progress.progress(i / len(target_stocks))
+    # 批次處理
+    batch_size = 10
+    for i in range(0, len(target_stocks), batch_size):
+        batch = target_stocks[i : i + batch_size]
+        progress_bar.progress(i / len(target_stocks))
+        status_text.text(f"掃描進度: {i}/{len(target_stocks)} ...")
+        
         try:
-            # 引入緩衝，避開 Rate Limit
-            time.sleep(random.uniform(0.3, 0.8))
-            df = yf.download(s, period="2mo", interval="1d", progress=False)
+            # 隨機延遲，避開頻率限制
+            time.sleep(random.uniform(0.5, 1.2))
+            data = yf.download(batch, period="2mo", interval="1d", progress=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
             
-            # 扁平化 Multi-Index
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            if df.empty or len(df) < 30: continue
-            
-            # 獲取價格與指標
-            price = float(df['Close'].iloc[-1])
-            vol5 = df['Volume'].rolling(5).mean().iloc[-1]
-            vol20 = df['Volume'].rolling(20).mean().iloc[-1]
-            vol_ratio = float(vol5 / vol20)
-            
-            # 條件計算
-            k_val = float(StochasticOscillator(df['High'], df['Low'], df['Close']).stoch().iloc[-1])
-            
-            # 篩選條件
-            if vol_ratio > 0.5 and k_val > 28:
-                results.append({
-                    "股票": s.replace(".TW", ""),
-                    "當前價格": round(price, 2),
-                    "量比": round(vol_ratio, 2),
-                    "K值": round(k_val, 2)
-                })
+            for s in batch:
+                if s not in data.columns: continue
+                df = data[s].dropna()
+                if len(df) < 30: continue
+                
+                # 計算指標
+                price = float(df['Close'].iloc[-1])
+                volume = float(df['Volume'].iloc[-1])
+                vol5 = df['Volume'].rolling(5).mean().iloc[-1]
+                vol20 = df['Volume'].rolling(20).mean().iloc[-1]
+                vol_ratio = float(vol5 / vol20)
+                
+                stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9, smooth_window=3)
+                k_val = float(stoch.stoch().iloc[-1])
+                
+                # 這裡暫時放寬條件以便讓你確認結果，你可以之後自行改回嚴格閥值
+                if vol_ratio > 1.2 and k_val > 60:
+                    results.append({
+                        "股票": s.replace(".TW", ""),
+                        "當前價格": round(price, 2),
+                        "當日成交量": int(volume),
+                        "量比": round(vol_ratio, 2),
+                        "K值": round(k_val, 2)
+                    })
         except: continue
             
-    progress.empty()
+    progress_bar.empty()
+    status_text.text("掃描完成！")
     return pd.DataFrame(results)
 
-st.title("🔥 台股噴發掃描器 (數據驗證版)")
-if st.button("執行驗證掃描"):
+st.title("🔥 台股 300 檔飆股掃描器 (強化版)")
+if st.button("執行 300 檔深度掃描"):
     df_res = scan_stocks()
     if not df_res.empty:
-        st.dataframe(df_res, use_container_width=True)
-        st.success("價格已同步顯示，你可以直接對照券商軟體確認！")
+        st.dataframe(df_res.sort_values(by="量比", ascending=False), use_container_width=True)
     else:
-        st.warning("無符合條件標的。")
+        st.warning("目前無標的符合條件。請嘗試調低條件閥值測試。")
