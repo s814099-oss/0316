@@ -52,7 +52,7 @@ def scan_stocks():
                 k_val = float(stoch.stoch().iloc[-1])
                 
                 # 這裡暫時放寬條件以便讓你確認結果，你可以之後自行改回嚴格閥值
-                if vol_ratio > 1.2 and k_val > 60:
+                if vol_ratio > 1 and k_val > 20:
                     results.append({
                         "股票": s.replace(".TW", ""),
                         "當前價格": round(price, 2),
