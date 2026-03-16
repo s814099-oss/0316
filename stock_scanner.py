@@ -4,64 +4,50 @@ import yfinance as yf
 import time
 import random
 import requests
-from ta.momentum import StochasticOscillator
 
-# 1. 強化版代號獲取：直接過濾掉權證(長度 > 4)與非個股標的
+st.set_page_config(layout="wide")
+
 @st.cache_data(ttl=86400)
-def get_clean_tickers():
-    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", 
-            "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
-    clean_list = []
-    for url in urls:
-        try:
-            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-            df = pd.read_html(resp.text)[0]
-            # 只取 4 位數代號 (個股)
-            tickers = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)].iloc[:, 0]
-            clean_list.extend([f"{t.split()[0]}.TW" for t in tickers])
-        except: continue
-    return list(set(clean_list))
+def get_target_tickers():
+    # 簡化版：只抓取上市個股，減少無效清單
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+    df = pd.read_html(resp.text)[0]
+    df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
+    return [f"{t.split()[0]}.TW" for t in df.iloc[:, 0]]
 
-# 2. 加入「冷卻模式」的掃描引擎
-def run_scanner_pro(tickers):
+def scan_stocks(tickers):
     results = []
-    # 每次只抓 5 檔，大幅降低被封鎖機率
-    batch_size = 5 
-    
+    # 限制每次處理的數量，避免記憶體溢出
+    subset = tickers[:100] 
     progress = st.progress(0)
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i:i + batch_size]
-        progress.progress(i / len(tickers))
-        
+    
+    for i, ticker in enumerate(subset):
+        progress.progress(i / len(subset))
         try:
-            data = yf.download(batch, period="1mo", interval="1d", group_by='ticker', progress=False)
+            # 每次單獨請求一檔，雖然慢，但絕對穩
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="1mo")
             
-            for s in batch:
-                # 若 data 是空的或該股無資料，直接跳過
-                df = data[s] if len(batch) > 1 else data
-                if df.empty or len(df) < 20: continue
-                
-                # 計算指標 (簡化版)
-                vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
-                stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9)
-                k = float(stoch.stoch().iloc[-1])
-                
-                if vol_ratio > 1.5 and k > 75:
-                    results.append({"代號": s, "量比": round(vol_ratio, 2), "K值": round(k, 2)})
+            if len(df) < 20: continue
             
-            # 動態冷卻：每批次後隨機休息 3-6 秒
-            time.sleep(random.uniform(3, 6))
+            # 計算簡單指標
+            vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
+            if vol_ratio > 1.5:
+                results.append({"代號": ticker, "量比": round(vol_ratio, 2)})
             
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(60) # 被鎖了？強制冷卻 1 分鐘
+            time.sleep(random.uniform(2, 4)) # 穩定且必要的間隔
+            
+        except Exception:
             continue
-            
     return pd.DataFrame(results)
 
-# --- UI ---
-if st.button("啟動優化版掃描"):
-    tickers = get_clean_tickers()
-    st.write(f"已過濾出 {len(tickers)} 檔個股，開始掃描...")
-    df_res = run_scanner_pro(tickers)
-    st.dataframe(df_res)
+st.title("📊 台股穩定篩選器")
+if st.button("開始執行穩定篩選 (前100檔)"):
+    with st.spinner("正在逐檔檢查，請耐心等待..."):
+        tickers = get_target_tickers()
+        df = scan_stocks(tickers)
+        if not df.empty:
+            st.dataframe(df)
+        else:
+            st.warning("目前無符合條件標的")
