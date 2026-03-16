@@ -10,7 +10,6 @@ st.set_page_config(page_title="台股飆股進階掃描", layout="wide")
 
 @st.cache_data(ttl=3600)
 def get_all_tickers():
-    # 改進：僅抓取 4 位數代號，初步過濾 ETF 或其他奇怪符號
     urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", 
             "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
     all_tickers = []
@@ -18,7 +17,7 @@ def get_all_tickers():
         try:
             resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             df = pd.read_html(resp.text)[0]
-            # 篩選：只留 4 位數代號
+            # 篩選 4 位數代號 (個股)
             df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
             tickers = [f"{str(x).split()[0]}.TW" for x in df.iloc[:, 0]]
             all_tickers.extend(tickers)
@@ -27,20 +26,20 @@ def get_all_tickers():
 
 def run_scanner(tickers):
     results_gain, results_high = [], []
-    batch_size = 10 # 縮小 batch 避免被鎖
+    batch_size = 10
     batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
     
     progress_bar = st.progress(0)
     for i, batch in enumerate(batches):
         progress_bar.progress((i + 1) / len(batches))
         try:
-            # 加入 group_by='ticker' 來確保結構穩定
+            # 獲取資料
             data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', progress=False)
             
             for s in batch:
-                if s not in data: continue
-                df = data[s].dropna()
-                if len(df) < 125: continue
+                # 處理下載到的資料
+                df = data[s] if len(batch) > 1 else data
+                if df.empty or len(df) < 125: continue
                 
                 # 計算指標
                 curr_close = float(df['Close'].iloc[-1])
@@ -57,19 +56,30 @@ def run_scanner(tickers):
                     if curr_close >= six_mo_high:
                         results_high.append({"代號": s.replace(".TW", ""), "現價": round(curr_close, 2), "量比": round(vol_ratio, 2), "K值": round(k_val, 2)})
             
-            time.sleep(random.uniform(3, 5)) # 增加休息時間，對抗 Rate Limit
-        except Exception as e:
-            if "Rate limited" in str(e): time.sleep(60) # 觸發限制則暫停 1 分鐘
+            time.sleep(random.uniform(3, 5))
+        except Exception:
             continue
             
     return pd.DataFrame(results_gain), pd.DataFrame(results_high)
 
-st.title("📊 台股飆股掃描器")
-if st.button("啟動掃描"):
-    with st.spinner('正在掃描市場...'):
+# --- UI 介面 ---
+st.title("📊 台股飆股進階掃描器")
+
+if st.button("啟動全面掃描"):
+    with st.spinner('正在掃描市場...請耐心等待'):
         all_tickers = get_all_tickers()
         df1, df2 = run_scanner(all_tickers)
         
-        tab1, tab2 = st.tabs(["🚀 短線強勢", "📈 中線突破"])
-        with tab1: st.dataframe(df1, use_container_width=True) if not df1.empty else st.info("無符合標的")
-        with tab2: st.dataframe(df2, use_container_width=True) if not df2.empty else st.info("無符合標的")
+    tab1, tab2 = st.tabs(["🚀 短線強勢 (3天漲幅>20%)", "📈 中線突破 (半年新高)"])
+    
+    with tab1:
+        if not df1.empty:
+            st.dataframe(df1, use_container_width=True)
+        else:
+            st.info("目前無符合 3 天強勢飆漲條件的標的")
+            
+    with tab2:
+        if not df2.empty:
+            st.dataframe(df2, use_container_width=True)
+        else:
+            st.info("目前無符合半年新高突破條件的標的")
