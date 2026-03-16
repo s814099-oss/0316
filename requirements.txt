@@ -2,5 +2,6 @@ streamlit
 pandas
 yfinance
 ta
-streamlit-autorefresh
+requests
 lxml
+streamlit-autorefresh
