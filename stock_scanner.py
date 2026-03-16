@@ -5,69 +5,73 @@ import time
 import random
 from ta.momentum import StochasticOscillator
 
-st.set_page_config(page_title="台股飆股掃描器 (穩定版)", layout="wide")
+st.set_page_config(page_title="台股全市場掃描器", layout="wide")
 
-# 1. 確保只有有效代碼
-def get_valid_stocks():
-    # 這裡放目前台股熱門且確定存在的代碼
-    # 若要擴充，只需將更多代碼加入此 list
-    tickers = ["2330.TW", "2317.TW", "2454.TW", "2303.TW", "2603.TW", "2382.TW", "3008.TW", "2308.TW", "2357.TW", "3017.TW", 
-               "2345.TW", "2609.TW", "2610.TW", "2409.TW", "2448.TW", "2881.TW", "2882.TW", "2891.TW", "2885.TW", "2886.TW"]
-    return tickers
+# 1. 自動抓取證交所最新上市櫃代碼清單
+@st.cache_data(ttl=86400)
+def get_all_stock_tickers():
+    # 這是證交所提供的 CSV 下載連結
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    try:
+        df = pd.read_html(url)[0]
+        # 清理資料：只留下代號為 4 碼數字的股票
+        df = df.iloc[1:, :2]
+        df.columns = ['代號名稱', 'ISIN']
+        # 分割代號與名稱
+        df['代號'] = df['代號名稱'].str.split(expand=True)[0]
+        # 過濾掉非 4 碼數字的代號 (例如權證或債券)
+        tickers = df[df['代號'].str.match(r'^\d{4}$')]['代號'] + ".TW"
+        return tickers.tolist()
+    except Exception as e:
+        st.error(f"無法獲取股票清單: {e}")
+        return []
 
-# 2. 核心掃描功能
-def scan_stocks():
-    target_stocks = get_valid_stocks()
-    st.write(f"系統準備中，開始掃描 {len(target_stocks)} 檔標的...")
-    
+# 2. 掃描核心
+def scan_stocks(tickers):
     results = []
+    st.write(f"系統已載入 {len(tickers)} 檔股票，開始進行深度掃描...")
     progress_bar = st.progress(0)
     
-    for i, s in enumerate(target_stocks):
-        progress_bar.progress((i + 1) / len(target_stocks))
+    # 為了避免被 Yahoo 封鎖，我們使用隨機延遲並分批處理
+    for i, s in enumerate(tickers):
+        progress_bar.progress((i + 1) / len(tickers))
         try:
-            # 隨機延遲保護連線
-            time.sleep(random.uniform(0.5, 1.0))
+            # 隨機延遲 (0.2 - 0.5 秒) 以模擬真人行為
+            time.sleep(random.uniform(0.2, 0.5))
             df = yf.download(s, period="2mo", interval="1d", progress=False)
             
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            if df.empty or len(df) < 30: continue
+            if df.empty or len(df) < 20: continue
             
             # 計算指標
             price = float(df['Close'].iloc[-1])
-            volume = float(df['Volume'].iloc[-1])
             vol5 = df['Volume'].rolling(5).mean().iloc[-1]
             vol20 = df['Volume'].rolling(20).mean().iloc[-1]
-            
             if vol20 == 0: continue
-            vol_ratio = float(vol5 / vol20)
             
-            # 這裡示範計算 K 值
-            stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9, smooth_window=3)
+            vol_ratio = vol5 / vol20
+            stoch = StochasticOscillator(df['High'], df['Low'], df['Close'])
             k_val = float(stoch.stoch().iloc[-1])
             
-            # 條件：這裡為了確保你有資料看，預設放寬到 vol_ratio > 0.8
-            if vol_ratio > 0.8 and k_val > 50:
+            if vol_ratio > 1.5 and k_val > 70:
                 results.append({
                     "股票": s.replace(".TW", ""),
-                    "當前價格": round(price, 2),
-                    "成交量": int(volume),
+                    "價格": round(price, 2),
                     "量比": round(vol_ratio, 2),
                     "K值": round(k_val, 2)
                 })
-        except Exception:
-            continue
+        except: continue
             
-    progress_bar.empty()
     return pd.DataFrame(results)
 
 # 3. 介面呈現
-st.title("🔥 台股噴發掃描器 (最終版)")
-if st.button("執行掃描"):
-    df_res = scan_stocks()
-    if not df_res.empty:
-        st.dataframe(df_res.sort_values(by="量比", ascending=False), use_container_width=True)
+st.title("📊 台股全市場飆股掃描器")
+if st.button("啟動全市場掃描"):
+    all_tickers = get_all_stock_tickers()
+    if all_tickers:
+        df_res = scan_stocks(all_tickers)
+        if not df_res.empty:
+            st.dataframe(df_res.sort_values(by="量比", ascending=False), width=None)
+        else:
+            st.warning("掃描完成，無標的符合設定條件。")
     else:
-        st.warning("無符合條件標的，請嘗試調低條件閾值。")
+        st.error("無法取得股票列表，請檢查網路。")
