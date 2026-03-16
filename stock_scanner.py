@@ -84,6 +84,9 @@ if st.button("啟動全市場掃描"):
         all_tickers = get_all_tickers()
         df_3day, df_6mo = scan_full_market(all_tickers)
         
+        # 顯示總掃描數量統計
+        st.info(f"✅ 掃描完成！共處理 {len(all_tickers)} 檔股票。")
+        
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("🚀 短線噴出 (3天漲幅 > 20%)")
