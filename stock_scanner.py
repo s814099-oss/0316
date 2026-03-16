@@ -3,48 +3,44 @@ import pandas as pd
 import yfinance as yf
 import time
 import random
-import ssl
 import requests
 from ta.momentum import StochasticOscillator
-from datetime import datetime
 
-ssl._create_default_https_context = ssl._create_unverified_context
 st.set_page_config(page_title="台股飆股進階掃描", layout="wide")
 
 @st.cache_data(ttl=3600)
 def get_all_tickers():
-    # 這裡確保只抓取有效的 TW 股票代號
-    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
+    # 改進：僅抓取 4 位數代號，初步過濾 ETF 或其他奇怪符號
+    urls = ["https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", 
+            "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"]
     all_tickers = []
     for url in urls:
         try:
-            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=10)
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             df = pd.read_html(resp.text)[0]
-            df = df.iloc[1:, [0]]
-            df.columns = ['代號名稱']
-            df['代號'] = df['代號名稱'].str.extract(r'^(\d{4})\s')
-            all_tickers.extend([f"{t}.TW" for t in df['代號'].dropna().unique()])
+            # 篩選：只留 4 位數代號
+            df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
+            tickers = [f"{str(x).split()[0]}.TW" for x in df.iloc[:, 0]]
+            all_tickers.extend(tickers)
         except: continue
     return list(set(all_tickers))
 
 def run_scanner(tickers):
     results_gain, results_high = [], []
-    progress_bar = st.progress(0)
-    
-    # 為了避免 yfinance 限制，分批次處理
-    batch_size = 20
+    batch_size = 10 # 縮小 batch 避免被鎖
     batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
     
+    progress_bar = st.progress(0)
     for i, batch in enumerate(batches):
         progress_bar.progress((i + 1) / len(batches))
         try:
-            # 獲取資料
-            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True)
+            # 加入 group_by='ticker' 來確保結構穩定
+            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', progress=False)
             
             for s in batch:
-                # 處理 yfinance 可能回傳單一股票或多股票的不同結構
-                df = data[s] if len(batch) > 1 else data
-                if df.empty or len(df) < 125: continue
+                if s not in data: continue
+                df = data[s].dropna()
+                if len(df) < 125: continue
                 
                 # 計算指標
                 curr_close = float(df['Close'].iloc[-1])
@@ -57,29 +53,23 @@ def run_scanner(tickers):
                 # 篩選條件
                 if vol_ratio > 1.85 and k_val > 80:
                     if three_day_gain > 0.20:
-                        results_gain.append({"代號": s.replace(".TW", ""), "現價": round(curr_close, 2), "3日漲幅": f"{round(three_day_gain*100, 2)}%", "量比": round(vol_ratio, 2), "K值": round(k_val, 2)})
+                        results_gain.append({"代號": s.replace(".TW", ""), "現價": round(curr_close, 2), "漲幅": f"{round(three_day_gain*100, 2)}%", "量比": round(vol_ratio, 2), "K值": round(k_val, 2)})
                     if curr_close >= six_mo_high:
                         results_high.append({"代號": s.replace(".TW", ""), "現價": round(curr_close, 2), "量比": round(vol_ratio, 2), "K值": round(k_val, 2)})
             
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(random.uniform(3, 5)) # 增加休息時間，對抗 Rate Limit
         except Exception as e:
+            if "Rate limited" in str(e): time.sleep(60) # 觸發限制則暫停 1 分鐘
             continue
             
     return pd.DataFrame(results_gain), pd.DataFrame(results_high)
 
-# UI 介面
-st.title("📊 台股飆股進階掃描器")
-if st.button("啟動全面掃描"):
-    with st.spinner('正在從市場下載並計算指標...'):
+st.title("📊 台股飆股掃描器")
+if st.button("啟動掃描"):
+    with st.spinner('正在掃描市場...'):
         all_tickers = get_all_tickers()
         df1, df2 = run_scanner(all_tickers)
         
-    tab1, tab2 = st.tabs(["🚀 短線強勢 (3天漲幅 > 20%)", "📈 中線突破 (半年新高)"])
-    
-    with tab1:
-        if not df1.empty: st.dataframe(df1, use_container_width=True)
-        else: st.warning("未搜尋到符合 3 日漲幅 > 20% 的標的，建議檢查條件是否過嚴。")
-            
-    with tab2:
-        if not df2.empty: st.dataframe(df2, use_container_width=True)
-        else: st.warning("未搜尋到符合半年新高條件的標的。")
+        tab1, tab2 = st.tabs(["🚀 短線強勢", "📈 中線突破"])
+        with tab1: st.dataframe(df1, use_container_width=True) if not df1.empty else st.info("無符合標的")
+        with tab2: st.dataframe(df2, use_container_width=True) if not df2.empty else st.info("無符合標的")
