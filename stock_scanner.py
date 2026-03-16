@@ -1,77 +1,31 @@
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import time
-import random
-import requests
-import urllib3
-from ta.momentum import StochasticOscillator
-
-# 抑制 SSL 不安全請求的警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-st.set_page_config(page_title="台股穩定掃描器", layout="wide")
-
-@st.cache_data(ttl=86400)
-def get_target_tickers():
-    """獲取上市股票清單"""
-    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    # 加入 verify=False 解決 SSL 錯誤
-    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
-    df = pd.read_html(resp.text)[0]
-    # 清洗：只選取 4 位數代號 (個股)
-    df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
-    return [f"{t.split()[0]}.TW" for t in df.iloc[:, 0]]
-
-def scan_stocks(tickers):
+def scan_full_market(all_tickers):
     results = []
-    # 限制測試數量，穩定後可移除 [:100]
-    target_list = tickers[:100] 
-    progress = st.progress(0)
-    status_text = st.empty()
+    # 每批次 50 檔，這是在速度與被封鎖風險間的最佳平衡點
+    batch_size = 50
+    batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
     
-    for i, ticker in enumerate(target_list):
-        progress.progress((i + 1) / len(target_list))
-        status_text.text(f"正在掃描 ({i+1}/{len(target_list)}): {ticker}")
-        
+    progress = st.progress(0)
+    
+    for i, batch in enumerate(batches):
+        progress.progress((i + 1) / len(batches))
         try:
-            # 使用 yf.Ticker 進行更穩定的單檔下載
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="1mo")
+            # 批次下載，顯著加速
+            data = yf.download(batch, period="1mo", interval="1d", group_by='ticker', threads=True, progress=False)
             
-            if df.empty or len(df) < 20: continue
+            for ticker in batch:
+                # 處理多檔下載後的索引結構
+                df = data[ticker] if len(batch) > 1 else data
+                if df.empty or len(df) < 20: continue
+                
+                # 指標計算
+                vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
+                if vol_ratio > 1.5:
+                    results.append({"代號": ticker.replace(".TW", ""), "量比": round(float(vol_ratio), 2)})
             
-            # 計算簡單指標
-            vol_mean = df['Volume'].rolling(20).mean().iloc[-1]
-            if vol_mean == 0: continue
-            vol_ratio = df['Volume'].iloc[-1] / vol_mean
-            
-            if vol_ratio > 1.5:
-                results.append({"代號": ticker, "量比": round(vol_ratio, 2)})
-            
-            # 隨機延遲，模仿人類行為，避免被 Yahoo 封鎖
-            time.sleep(random.uniform(3, 5))
+            # 每批次後強制冷卻，避免觸發 429 Error
+            time.sleep(random.uniform(5, 8))
             
         except Exception:
             continue
             
-    status_text.empty()
     return pd.DataFrame(results)
-
-# --- UI 介面 ---
-st.title("📊 台股穩定篩選器")
-st.info("此版本已優化 SSL 連線與請求頻率，適合在雲端環境執行。")
-
-if st.button("開始掃描前 100 檔"):
-    with st.spinner("正在執行掃描，請稍候..."):
-        try:
-            tickers = get_target_tickers()
-            df = scan_stocks(tickers)
-            
-            if not df.empty:
-                st.success(f"掃描完成！共找到 {len(df)} 檔符合條件標的。")
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.warning("掃描完成，無符合條件標的。")
-        except Exception as e:
-            st.error(f"發生系統錯誤: {e}")
