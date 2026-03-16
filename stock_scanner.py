@@ -75,7 +75,7 @@ def run_scanner(tickers):
             k_val = float(stoch.stoch().iloc[-1])
             
             # 你的核心條件：量比與 K 值
-            if vol_ratio > 1.2 and k_val > 60:
+            if vol_ratio > 1.85 and k_val > 80:
                 results.append({
                     "股票": s.replace(".TW", ""),
                     "現價": round(price, 2),
