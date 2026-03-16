@@ -51,7 +51,7 @@ def scan_all():
             k_val = stoch.stoch().iloc[-1]
             
             # 你的原始邏輯條件
-            if vol_ratio > 1.85 and (return3 > 0.20 or limit_up_sum >= 2) and k_val > 80:
+            if vol_ratio > 0 and (return3 > 0.20 or limit_up_sum >= 2) and k_val > 80:
                 results.append({
                     "股票": s.replace(".TW", ""),
                     "價格": round(float(close_now), 2),
