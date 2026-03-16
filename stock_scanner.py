@@ -13,16 +13,25 @@ st.set_page_config(layout="wide", page_title="台股飆股與突破掃描器")
 
 @st.cache_data(ttl=86400)
 def get_all_tickers():
-    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
-    df = pd.read_html(resp.text)[0]
-    df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
-    return [f"{t.split()[0]}.TW" for t in df.iloc[:, 0]]
+    # 整合上市與上櫃清單
+    urls = {
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2": "TW",  # 上市
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4": "TWO" # 上櫃
+    }
+    all_tickers = []
+    for url, suffix in urls.items():
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
+        df = pd.read_html(resp.text)[0]
+        # 篩選代號
+        symbols = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)].iloc[:, 0]
+        all_tickers.extend([f"{s.split()[0]}.{suffix}" for s in symbols])
+    return list(set(all_tickers))
 
 def scan_full_market(all_tickers):
     results_3day = []
     results_6mo = []
     
+    # 為了避免超時與被封鎖，將清單分批處理
     batch_size = 30
     batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
     
@@ -30,6 +39,7 @@ def scan_full_market(all_tickers):
     for i, batch in enumerate(batches):
         progress.progress((i + 1) / len(batches))
         try:
+            # 下載數據
             data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True, progress=False)
             
             for ticker in batch:
@@ -42,11 +52,11 @@ def scan_full_market(all_tickers):
                     df_sub = df.iloc[:idx+1]
                     if len(df_sub) < 20: continue
                     
-                    # 單位換算
+                    # 單位換算：成交量(張)
                     vol_in_thousands = float(df_sub['Volume'].iloc[-1]) / 1000
                     if vol_in_thousands < 5000: continue
                     
-                    # 指標
+                    # 指標計算
                     ma5 = df_sub['Volume'].rolling(5, min_periods=1).mean().iloc[-1]
                     ma20 = df_sub['Volume'].rolling(20, min_periods=1).mean().iloc[-1]
                     vol_ratio = (ma5 / ma20) if ma20 > 0 else 0
@@ -62,12 +72,12 @@ def scan_full_market(all_tickers):
                             prev_close = float(df['Close'].iloc[idx-3])
                             three_day_gain = (float(df['Close'].iloc[idx]) - prev_close) / prev_close
                             if three_day_gain > 0.20:
-                                results_3day.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "最新現價": round(latest_close, 2), "漲幅": f"{three_day_gain:.1%}", "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
+                                results_3day.append({"代號": ticker.split('.')[0], "訊號日期": signal_date, "最新現價": round(latest_close, 2), "漲幅": f"{three_day_gain:.1%}", "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
                         
                         # 策略 B: 半年新高
                         six_mo_high = df['Close'].rolling(120, min_periods=1).max().iloc[-1]
                         if float(df['Close'].iloc[idx]) >= six_mo_high:
-                            results_6mo.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "最新現價": round(latest_close, 2), "半年高點": round(six_mo_high, 2), "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
+                            results_6mo.append({"代號": ticker.split('.')[0], "訊號日期": signal_date, "最新現價": round(latest_close, 2), "半年高點": round(six_mo_high, 2), "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
                         
                         break 
             time.sleep(random.uniform(1, 2))
@@ -81,7 +91,7 @@ if st.button("啟動全市場掃描"):
     with st.spinner("掃描中，請稍候..."):
         all_tickers = get_all_tickers()
         df_3day, df_6mo = scan_full_market(all_tickers)
-        st.info(f"✅ 掃描完成！共處理 {len(all_tickers)} 檔股票。")
+        st.info(f"✅ 掃描完成！總共處理了 {len(all_tickers)} 檔上市櫃股票。")
         
         col1, col2 = st.columns(2)
         with col1:
