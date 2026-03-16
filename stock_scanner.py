@@ -53,7 +53,7 @@ def scan_full_market(all_tickers):
                     stoch = StochasticOscillator(df_sub['High'], df_sub['Low'], df_sub['Close'], window=9)
                     k = float(stoch.stoch().iloc[-1])
                     
-                    if vol_ratio > 1.85 and k > 80:
+                    if vol_ratio > 0.1 and k > 80:
                         signal_date = df.index[idx].strftime('%Y-%m-%d')
                         curr_close = float(df['Close'].iloc[idx])
                         
