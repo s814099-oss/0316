@@ -1,36 +1,93 @@
 import streamlit as st
+import pandas as pd
 import yfinance as yf
+import time
+import random
+import requests
+import urllib3
+from ta.momentum import StochasticOscillator
 
-st.title("📊 飆股掃描器：強制診斷模式")
+# 設定
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+st.set_page_config(layout="wide", page_title="台股飆股與突破掃描器")
 
-if st.button("執行強制診斷 (列印計算數據)"):
-    # 我們隨機選一檔熱門股測試，或者你可以指定代號
-    test_tickers = ["2330.TW", "2317.TW", "2454.TW"]
+@st.cache_data(ttl=86400)
+def get_all_tickers():
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
+    df = pd.read_html(resp.text)[0]
+    df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
+    return [f"{t.split()[0]}.TW" for t in df.iloc[:, 0]]
+
+def scan_full_market(all_tickers):
+    results_3day = []
+    results_6mo = []
     
-    for ticker in test_tickers:
-        st.write(f"### 檢查標的: {ticker}")
-        stock = yf.Ticker(ticker)
-        df = stock.history(period="1mo")
-        
-        if df.empty:
-            st.error("下載不到資料")
+    batch_size = 30
+    batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
+    
+    progress = st.progress(0)
+    for i, batch in enumerate(batches):
+        progress.progress((i + 1) / len(batches))
+        try:
+            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True, progress=False)
+            
+            for ticker in batch:
+                df = data[ticker] if len(batch) > 1 else data
+                if df.empty or len(df) < 30: continue
+                
+                # 回溯檢查最近 7 天
+                for lookback in range(7):
+                    idx = -(lookback + 1)
+                    df_sub = df.iloc[:idx+1]
+                    if len(df_sub) < 20: continue
+                    
+                    # 1. 強制換算單位：成交量 (張)
+                    vol_in_thousands = float(df_sub['Volume'].iloc[-1]) / 1000
+                    if vol_in_thousands < 5000: continue
+                    
+                    # 2. 技術指標計算 (加入 min_periods=1 解決 NaN 問題)
+                    ma5 = df_sub['Volume'].rolling(window=5, min_periods=1).mean().iloc[-1]
+                    ma20 = df_sub['Volume'].rolling(window=20, min_periods=1).mean().iloc[-1]
+                    vol_ratio = (ma5 / ma20) if ma20 > 0 else 0
+                    
+                    stoch = StochasticOscillator(df_sub['High'], df_sub['Low'], df_sub['Close'], window=9, fillna=True)
+                    k = float(stoch.stoch().iloc[-1])
+                    
+                    # 篩選條件
+                    if vol_ratio > 1.85 and k > 80:
+                        signal_date = df.index[idx].strftime('%Y-%m-%d')
+                        curr_close = float(df['Close'].iloc[idx])
+                        
+                        # 策略 A: 3天漲幅 > 20%
+                        if idx <= -4:
+                            prev_close = float(df['Close'].iloc[idx-3])
+                            three_day_gain = (curr_close - prev_close) / prev_close
+                            if three_day_gain > 0.20:
+                                results_3day.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "漲幅": f"{three_day_gain:.1%}", "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
+                        
+                        # 策略 B: 半年新高
+                        six_mo_high = df_sub['Close'].rolling(120, min_periods=1).max().iloc[-1]
+                        if curr_close >= six_mo_high:
+                            results_6mo.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "現價": round(curr_close, 2), "半年高點": round(six_mo_high, 2), "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
+                        
+                        break 
+            time.sleep(random.uniform(1, 2))
+        except Exception:
             continue
-            
-        # 計算診斷數據
-        latest_vol = df['Volume'].iloc[-1] / 1000
-        # 簡單計算量比：(今日成交量 / 20日均量)
-        vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
+    return pd.DataFrame(results_3day), pd.DataFrame(results_6mo)
+
+# UI 介面
+st.title("📊 飆股策略精準掃描器")
+if st.button("啟動全市場掃描"):
+    with st.spinner("掃描中，請稍候..."):
+        all_tickers = get_all_tickers()
+        df_3day, df_6mo = scan_full_market(all_tickers)
         
-        st.write(f"今日成交量(張): {latest_vol:,.0f}")
-        st.write(f"今日量比值: {vol_ratio:.2f}")
-        
-        # 直接判斷
-        if latest_vol >= 5000:
-            st.write("✅ 成交量條件通過 (>= 5000 張)")
-        else:
-            st.write("❌ 成交量條件未通過")
-            
-        if vol_ratio > 1.85:
-            st.write("✅ 量比條件通過 (> 1.85)")
-        else:
-            st.write("❌ 量比條件未通過")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🚀 短線噴出 (3天漲幅 > 20%)")
+            st.dataframe(df_3day, use_container_width=True)
+        with col2:
+            st.subheader("📈 中線突破 (半年新高)")
+            st.dataframe(df_6mo, use_container_width=True)
