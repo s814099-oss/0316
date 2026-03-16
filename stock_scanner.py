@@ -46,7 +46,7 @@ def scan_full_market(all_tickers):
                     vol_in_thousands = float(df_sub['Volume'].iloc[-1]) / 1000
                     if vol_in_thousands < 5000: continue
                     
-                    # 2. 技術指標計算 (加入 min_periods=1 解決 NaN 問題)
+                    # 2. 技術指標計算
                     ma5 = df_sub['Volume'].rolling(window=5, min_periods=1).mean().iloc[-1]
                     ma20 = df_sub['Volume'].rolling(window=20, min_periods=1).mean().iloc[-1]
                     vol_ratio = (ma5 / ma20) if ma20 > 0 else 0
@@ -54,22 +54,22 @@ def scan_full_market(all_tickers):
                     stoch = StochasticOscillator(df_sub['High'], df_sub['Low'], df_sub['Close'], window=9, fillna=True)
                     k = float(stoch.stoch().iloc[-1])
                     
-                    # 篩選條件
                     if vol_ratio > 1.85 and k > 80:
                         signal_date = df.index[idx].strftime('%Y-%m-%d')
-                        curr_close = float(df['Close'].iloc[idx])
+                        # 取得最新收盤價 (為了即時性)
+                        latest_close = float(df['Close'].iloc[-1])
                         
                         # 策略 A: 3天漲幅 > 20%
                         if idx <= -4:
                             prev_close = float(df['Close'].iloc[idx-3])
-                            three_day_gain = (curr_close - prev_close) / prev_close
+                            three_day_gain = (float(df['Close'].iloc[idx]) - prev_close) / prev_close
                             if three_day_gain > 0.20:
                                 results_3day.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "漲幅": f"{three_day_gain:.1%}", "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
                         
-                        # 策略 B: 半年新高
-                        six_mo_high = df_sub['Close'].rolling(120, min_periods=1).max().iloc[-1]
-                        if curr_close >= six_mo_high:
-                            results_6mo.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "現價": round(curr_close, 2), "半年高點": round(six_mo_high, 2), "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
+                        # 策略 B: 半年新高 (顯示最新價格 vs 半年高點)
+                        six_mo_high = df['Close'].rolling(120, min_periods=1).max().iloc[-1]
+                        if float(df['Close'].iloc[idx]) >= six_mo_high:
+                            results_6mo.append({"代號": ticker.replace(".TW", ""), "訊號日期": signal_date, "最新現價": round(latest_close, 2), "半年高點": round(six_mo_high, 2), "量比": round(vol_ratio, 2), "成交量(張)": int(vol_in_thousands)})
                         
                         break 
             time.sleep(random.uniform(1, 2))
@@ -84,7 +84,6 @@ if st.button("啟動全市場掃描"):
         all_tickers = get_all_tickers()
         df_3day, df_6mo = scan_full_market(all_tickers)
         
-        # 顯示總掃描數量統計
         st.info(f"✅ 掃描完成！共處理 {len(all_tickers)} 檔股票。")
         
         col1, col2 = st.columns(2)
