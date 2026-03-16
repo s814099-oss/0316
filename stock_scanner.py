@@ -5,10 +5,12 @@ import time
 import random
 import ssl
 import requests
+from ta.momentum import StochasticOscillator
 from datetime import datetime, timedelta
 
+# 強制繞過 SSL
 ssl._create_default_https_context = ssl._create_unverified_context
-st.set_page_config(page_title="台股飆股掃描器", layout="wide")
+st.set_page_config(page_title="台股精準指標掃描", layout="wide")
 
 @st.cache_data(ttl=86400)
 def get_all_tickers():
@@ -25,8 +27,8 @@ def get_all_tickers():
     return list(set(all_tickers))
 
 def run_scanner(tickers, min_vol):
-    res_20pct = []
-    res_high = []
+    res_explosion = [] # 量比>1.85 & K>80 & 3天漲幅>20%
+    res_breakout = []  # 量比>1.85 & K>80 & 半年新高
     total_count = len(tickers)
     
     progress_bar = st.progress(0)
@@ -37,17 +39,16 @@ def run_scanner(tickers, min_vol):
     batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
     
     for i, batch in enumerate(batches):
-        # 計算剩餘時間
         elapsed = time.time() - start_time
         avg_time = elapsed / (i + 1)
         eta_sec = (len(batches) - (i + 1)) * avg_time
         eta_str = str(timedelta(seconds=int(eta_sec)))
         
         progress_bar.progress((i + 1) / len(batches))
-        status_text.text(f"已處理: {min((i+1)*batch_size, total_count)}/{total_count} 檔 | 預計剩餘: {eta_str}")
+        status_text.text(f"掃描進度: {min((i+1)*batch_size, total_count)}/{total_count} | 預計剩餘: {eta_str}")
         
         try:
-            time.sleep(random.uniform(1.0, 1.5))
+            time.sleep(random.uniform(1.2, 1.8))
             data = yf.download(batch, period="6mo", interval="1d", progress=False, group_by='ticker', threads=True)
             
             for s in batch:
@@ -55,36 +56,45 @@ def run_scanner(tickers, min_vol):
                 df = data[s].dropna()
                 if len(df) < 120: continue 
                 
+                # 1. 成交量門檻
                 if float(df['Volume'].iloc[-1]) < (min_vol * 1000): continue
                 
-                cur_close = float(df['Close'].iloc[-1])
+                # 2. 計算核心指標 (量比與K值)
+                vol5 = df['Volume'].rolling(5).mean().iloc[-1]
+                vol20 = df['Volume'].rolling(20).mean().iloc[-1]
+                if vol20 == 0: continue
                 
-                # 策略 1: 3天漲幅 > 20% 或 近期出現漲停板 (簡單判斷)
-                # 這裡定義：最近 3 天內漲幅 > 20%
-                three_day_gain = (cur_close - df['Close'].iloc[-4]) / df['Close'].iloc[-4]
-                if three_day_gain >= 0.20:
-                    res_20pct.append({"代號": s.replace(".TW", ""), "現價": cur_close, "漲幅": f"{three_day_gain:.2%}"})
+                vol_ratio = vol5 / vol20
+                stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9, smooth_window=3)
+                k_val = float(stoch.stoch().iloc[-1])
                 
-                # 策略 2: 創半年新高 (收盤價 > 過去 120 天最高價)
-                if cur_close >= df['High'].rolling(120).max().iloc[-1]:
-                    res_high.append({"代號": s.replace(".TW", ""), "現價": cur_close})
+                # 3. 核心指標過濾
+                if vol_ratio > 1.85 and k_val > 80:
+                    cur_close = float(df['Close'].iloc[-1])
                     
+                    # 策略 A: 3天漲幅 > 20%
+                    three_day_gain = (cur_close - df['Close'].iloc[-4]) / df['Close'].iloc[-4]
+                    if three_day_gain >= 0.20:
+                        res_explosion.append({"代號": s.replace(".TW", ""), "現價": cur_close, "漲幅": f"{three_day_gain:.2%}", "量比": round(vol_ratio, 2), "K值": round(k_val, 2)})
+                    
+                    # 策略 B: 半年新高 (收盤價為近120日最高)
+                    if cur_close >= df['High'].rolling(120).max().iloc[-1]:
+                        res_breakout.append({"代號": s.replace(".TW", ""), "現價": cur_close, "量比": round(vol_ratio, 2), "K值": round(k_val, 2)})
+                        
         except: continue
     
-    return pd.DataFrame(res_20pct), pd.DataFrame(res_high)
+    return pd.DataFrame(res_explosion), pd.DataFrame(res_breakout)
 
-st.title("🔥 台股雙策略掃描器")
-st.sidebar.subheader("參數設定")
+# --- UI ---
+st.title("📊 精準選股：技術指標 + 雙維度篩選")
 min_vol = st.sidebar.number_input("最低成交量 (張)", value=500)
 
-if st.button("開始執行掃描"):
+if st.button("啟動掃描 (量比>1.85, K>80)"):
     tickers = get_all_tickers()
-    df_20, df_high = run_scanner(tickers, min_vol)
+    df_exp, df_break = run_scanner(tickers, min_vol)
     
-    tab1, tab2 = st.tabs(["🚀 短線爆發 (3天漲20% / 漲停)", "📈 半年新高趨勢"])
+    tab1, tab2 = st.tabs(["🚀 強勢噴發 (指標 + 3天漲20%)", "📈 強勢突破 (指標 + 半年新高)"])
     with tab1:
-        st.write(f"共找到 {len(df_20)} 檔")
-        st.dataframe(df_20, use_container_width=True)
+        st.dataframe(df_exp, use_container_width=True)
     with tab2:
-        st.write(f"共找到 {len(df_high)} 檔")
-        st.dataframe(df_high, use_container_width=True)
+        st.dataframe(df_break, use_container_width=True)
