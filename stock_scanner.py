@@ -38,7 +38,7 @@ def scan_stocks():
             k_val = float(StochasticOscillator(df['High'], df['Low'], df['Close']).stoch().iloc[-1])
             
             # 篩選條件
-            if vol_ratio > 1.85 and k_val > 80:
+            if vol_ratio > 0.5 and k_val > 28:
                 results.append({
                     "股票": s.replace(".TW", ""),
                     "當前價格": round(price, 2),
