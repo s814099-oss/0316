@@ -7,9 +7,8 @@ import requests
 import urllib3
 from ta.momentum import StochasticOscillator
 
-# 1. 環境設定
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(layout="wide", page_title="台股飆股精準掃描器")
+st.set_page_config(layout="wide", page_title="台股飆股掃描器")
 
 @st.cache_data(ttl=86400)
 def get_all_tickers():
@@ -22,19 +21,18 @@ def get_all_tickers():
 def scan_full_market(all_tickers):
     results_3day = []
     results_6mo = []
-    scanned_count = 0
+    scanned_count = 0  # 確保計數器初始化
     
     batch_size = 30
     batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
     
-    # 建立進度顯示元件
     progress_text = st.empty()
     progress_bar = st.progress(0)
     
     for i, batch in enumerate(batches):
         scanned_count += len(batch)
         progress_bar.progress((i + 1) / len(batches))
-        progress_text.text(f"正在掃描中... 已完成 {scanned_count} / {len(all_tickers)} 檔股票")
+        progress_text.text(f"掃描中: {scanned_count} / {len(all_tickers)} 檔")
         
         try:
             data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True, progress=False)
@@ -43,11 +41,13 @@ def scan_full_market(all_tickers):
                 df = data[ticker] if len(batch) > 1 else data
                 if df.empty or len(df) < 30: continue
                 
+                # 回溯機制
                 for lookback in range(7):
                     idx = -(lookback + 1)
                     df_sub = df.iloc[:idx+1]
                     if len(df_sub) < 20: continue
                     
+                    # 邏輯核心：恢復之前有效的篩選標準
                     vol_in_thousands = float(df_sub['Volume'].iloc[-1]) / 1000
                     if vol_in_thousands < 5000: continue
                     
@@ -58,6 +58,7 @@ def scan_full_market(all_tickers):
                     stoch = StochasticOscillator(df_sub['High'], df_sub['Low'], df_sub['Close'], window=9, fillna=True)
                     k = float(stoch.stoch().iloc[-1])
                     
+                    # 篩選條件
                     if vol_ratio > 1.85 and k > 80:
                         signal_date = df.index[idx].strftime('%Y-%m-%d')
                         curr_close = float(df['Close'].iloc[idx])
