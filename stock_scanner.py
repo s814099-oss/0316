@@ -51,7 +51,7 @@ def scan_full_market(all_tickers):
                 
                 # 策略 2: 半年新高
                 six_mo_high = df['Close'].rolling(120).max().iloc[-1]
-                if curr_close >= six_mo_high and vol_ratio > 1.5:
+                if curr_close >= six_mo_high and vol_ratio > 1.85:
                     results_high.append({"代號": ticker.replace(".TW", ""), "現價": round(curr_close, 2), "量比": round(float(vol_ratio), 2)})
             
             time.sleep(random.uniform(5, 8))
