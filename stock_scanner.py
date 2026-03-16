@@ -2,32 +2,46 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import time
+import requests
+import urllib3
 from ta.momentum import StochasticOscillator
 
-st.set_page_config(layout="wide", page_title="飆股穩健掃描器")
+# 設定
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+st.set_page_config(layout="wide", page_title="台股飆股掃描器")
 
-# 建議：測試階段我們先縮小範圍，避免被 Yahoo 鎖 IP
-@st.cache_data(ttl=3600)
-def get_tickers():
-    # 這裡放你要掃描的清單，全市場可改為從證交所下載
-    return ["2330.TW", "2317.TW", "2454.TW", "2303.TW", "2412.TW", "2308.TW", "2881.TW", "2882.TW", "2002.TW", "1301.TW", "6669.TW", "3008.TW", "2357.TW"]
+# 側邊欄控制
+st.sidebar.header("篩選條件")
+vol_threshold = st.sidebar.slider("成交量門檻 (張)", 500, 5000, 1000, 100)
+vr_threshold = st.sidebar.slider("量比門檻", 0.5, 2.0, 1.2, 0.1)
+k_threshold = st.sidebar.slider("K值門檻", 20, 80, 50, 5)
 
-def scan_stocks(tickers):
+@st.cache_data(ttl=86400)
+def get_all_tickers():
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
+    df = pd.read_html(resp.text)[0]
+    df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
+    return [f"{t.split()[0]}.TW" for t in df.iloc[:, 0]]
+
+def scan_full_market(all_tickers):
     results = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    for i, ticker in enumerate(tickers):
-        progress_bar.progress((i + 1) / len(tickers))
+    for i, ticker in enumerate(all_tickers):
+        progress_bar.progress((i + 1) / len(all_tickers))
+        status_text.text(f"掃描中: {i+1}/{len(all_tickers)} | {ticker}")
         try:
-            # 加入 timeout 與更穩定的連線設定
-            df = yf.download(ticker, period="6mo", interval="1d", threads=False, progress=False, timeout=10)
+            df = yf.download(ticker, period="6mo", interval="1d", threads=False, progress=False)
             if df.empty or len(df) < 20: continue
             
-            # 成交量單位校正
+            # 動態單位判定
             vol_raw = float(df['Volume'].iloc[-1])
             vol_in_zhang = vol_raw / 1000 if vol_raw > 100000 else vol_raw
             
-            # 技術指標計算
+            if vol_in_zhang < vol_threshold: continue
+            
             ma5 = df['Volume'].rolling(5, min_periods=1).mean().iloc[-1]
             ma20 = df['Volume'].rolling(20, min_periods=1).mean().iloc[-1]
             vol_ratio = (ma5 / ma20) if ma20 > 0 else 0
@@ -35,19 +49,13 @@ def scan_stocks(tickers):
             stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9, fillna=True)
             k = float(stoch.stoch().iloc[-1])
             
-            # 放寬篩選條件：只要成交量大於 500 張、量比 > 1.0、K > 50 即納入
-            if vol_in_zhang > 500 and vol_ratio > 1.0 and k > 50:
-                results.append({"代號": ticker, "成交量(張)": int(vol_in_zhang), "量比": round(vol_ratio, 2), "K值": round(k, 2)})
-            
-            time.sleep(1.2) # 強制延遲，確保不會觸發伺服器防火牆
-        except Exception as e:
-            continue
+            if vol_ratio > vr_threshold and k > k_threshold:
+                results.append({"代號": ticker.replace(".TW", ""), "成交量(張)": int(vol_in_zhang), "量比": round(vol_ratio, 2), "K值": round(k, 2)})
+        except: continue
     return pd.DataFrame(results)
 
-st.title("📊 飆股策略穩健掃描器")
-if st.button("啟動掃描"):
-    df_res = scan_stocks(get_tickers())
-    if not df_res.empty:
-        st.dataframe(df_res, use_container_width=True)
-    else:
-        st.warning("本次掃描無符合條件股票，請調整篩選參數。")
+st.title("📊 飆股策略精準掃描器")
+if st.button("啟動全市場掃描"):
+    df = scan_full_market(get_all_tickers())
+    if not df.empty: st.dataframe(df, use_container_width=True)
+    else: st.warning("未找到股票，請嘗試在左側降低篩選門檻。")
