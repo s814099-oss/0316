@@ -7,80 +7,72 @@ import requests
 import urllib3
 from ta.momentum import StochasticOscillator
 
-# 1. 環境設定：隱藏 SSL 警告
+# 隱藏 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股全市場飆股掃描器", layout="wide")
+st.set_page_config(page_title="台股飆股與突破掃描", layout="wide")
 
 @st.cache_data(ttl=86400)
 def get_all_tickers():
-    """獲取上市所有個股清單"""
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
     df = pd.read_html(resp.text)[0]
-    # 正規表達式篩選 4 位數代號
     df = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)]
     return [f"{t.split()[0]}.TW" for t in df.iloc[:, 0]]
 
 def scan_full_market(all_tickers):
-    """執行全市場分批掃描"""
-    results = []
-    batch_size = 30 # 每批次 30 檔，平衡速度與穩定性
+    results_gain = [] # 飆股策略結果
+    results_high = [] # 半年新高結果
+    batch_size = 30
     batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
     
     progress = st.progress(0)
-    status_text = st.empty()
     
     for i, batch in enumerate(batches):
         progress.progress((i + 1) / len(batches))
-        status_text.text(f"掃描進度: {min((i+1)*batch_size, len(all_tickers))} / {len(all_tickers)} 檔")
-        
         try:
-            # 啟用多執行緒 threads=True
-            data = yf.download(batch, period="1mo", interval="1d", group_by='ticker', threads=True, progress=False)
+            # 下載半年資料以計算 3 天漲幅與半年新高
+            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True, progress=False)
             
             for ticker in batch:
                 df = data[ticker] if len(batch) > 1 else data
-                if df.empty or len(df) < 20: continue
+                if df.empty or len(df) < 125: continue
                 
-                # 指標計算
-                vol_20ma = df['Volume'].rolling(20).mean().iloc[-1]
-                if vol_20ma == 0: continue
-                vol_ratio = df['Volume'].iloc[-1] / vol_20ma
-                
-                # 計算 K 值
+                curr_close = float(df['Close'].iloc[-1])
+                # 量比: 5日均量 / 20日均量
+                vol_ratio = (df['Volume'].rolling(5).mean().iloc[-1]) / (df['Volume'].rolling(20).mean().iloc[-1])
+                # K 值
                 stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9)
                 k = float(stoch.stoch().iloc[-1])
                 
-                # 篩選飆股條件：量比 > 1.5 且 K > 75
-                if vol_ratio > 1.5 and k > 75:
-                    results.append({
-                        "代號": ticker.replace(".TW", ""), 
-                        "量比": round(float(vol_ratio), 2), 
-                        "K值": round(k, 2)
-                    })
+                # 策略 1: 3天漲幅 > 20% 且 量比 > 1.85 且 K > 80
+                three_day_gain = (curr_close - df['Close'].iloc[-4]) / df['Close'].iloc[-4]
+                if vol_ratio > 1.85 and k > 80 and three_day_gain > 0.20:
+                    results_gain.append({"代號": ticker.replace(".TW", ""), "現價": round(curr_close, 2), "漲幅": f"{round(three_day_gain*100, 1)}%", "量比": round(float(vol_ratio), 2)})
+                
+                # 策略 2: 半年新高
+                six_mo_high = df['Close'].rolling(120).max().iloc[-1]
+                if curr_close >= six_mo_high and vol_ratio > 1.5:
+                    results_high.append({"代號": ticker.replace(".TW", ""), "現價": round(curr_close, 2), "量比": round(float(vol_ratio), 2)})
             
-            # 每批次後強制冷卻，保護 API 連線品質
             time.sleep(random.uniform(5, 8))
-            
         except Exception:
             continue
             
-    status_text.empty()
-    return pd.DataFrame(results)
+    return pd.DataFrame(results_gain), pd.DataFrame(results_high)
 
 # --- UI 渲染 ---
-st.title("📊 台股全市場飆股掃描器 (進階版)")
-if st.button("啟動全市場掃描"):
-    with st.spinner("正在掃描 1700+ 檔股票，這大約需要 5-10 分鐘，請勿關閉網頁..."):
+st.title("📊 飆股策略全市場掃描")
+if st.button("啟動掃描 (3天強勢飆股 & 半年突破)"):
+    with st.spinner("正在執行複雜運算與全市場下載..."):
         all_tickers = get_all_tickers()
-        df_res = scan_full_market(all_tickers)
+        df1, df2 = scan_full_market(all_tickers)
         
-        if not df_res.empty:
-            st.success(f"掃描完成！共發現 {len(df_res)} 檔符合標的。")
-            st.dataframe(df_res.sort_values("量比", ascending=False), use_container_width=True)
+        tab1, tab2 = st.tabs(["🚀 短線強勢 (3天漲幅>20%)", "📈 中線突破 (半年新高)"])
+        
+        with tab1:
+            if not df1.empty: st.dataframe(df1, use_container_width=True)
+            else: st.info("無符合短線飆漲條件的標的")
             
-            # 加入 CSV 下載功能
-            csv = df_res.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(label="📥 下載掃描結果 CSV", data=csv, file_name='market_scan_results.csv', mime='text/csv')
-        else:
-            st.warning("掃描完畢，目前市場無符合飆股條件的標的。")
+        with tab2:
+            if not df2.empty: st.dataframe(df2, use_container_width=True)
+            else: st.info("無符合半年突破條件的標的")
