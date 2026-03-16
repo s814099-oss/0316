@@ -4,17 +4,16 @@ import yfinance as yf
 import requests
 import re
 from ta.momentum import StochasticOscillator
-from streamlit_autorefresh import st_autorefresh
 import datetime
 
-# 頁面設定
-st.set_page_config(page_title="台股飆股掃描", layout="wide")
-st_autorefresh(interval=60000, key="datarefresh") # 每 60 秒更新一次，避免過度請求
+# 頁面配置
+st.set_page_config(page_title="台股飆股掃描器", layout="wide")
 
-# 1. 取得全台股清單
-@st.cache_data(ttl=3600)
+# 1. 取得全台股清單 (包含上市櫃)
+@st.cache_data(ttl=86400)
 def get_all_stocks():
     codes = []
+    # 抓取證交所與櫃買清單
     for mode in ["2", "4"]:
         try:
             url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
@@ -27,34 +26,34 @@ def get_all_stocks():
         except: continue
     return list(set(codes))
 
-# 2. 分批掃描核心 (解決 ValueError 的關鍵)
-def scan_in_batches(stock_list):
+# 2. 核心掃描條件 (完全依照你的設定)
+def run_scanner(stock_list):
     results = []
-    batch_size = 30  # 每次處理 30 檔，穩健度最高
+    batch_size = 50 # 分批處理避免崩潰
+    progress = st.progress(0)
     
     for i in range(0, len(stock_list), batch_size):
         batch = stock_list[i : i + batch_size]
+        progress.progress(i / len(stock_list))
+        
         try:
-            # 分批下載
+            # 下載數據
             data = yf.download(batch, period="1mo", interval="1d", group_by='ticker', threads=True, progress=False)
             
-            # 若 batch 只有一檔，格式會不同，需統一轉為 DataFrame 字典
-            if len(batch) == 1:
-                data_dict = {batch[0]: data}
-            else:
-                data_dict = {s: data[s] for s in batch if s in data.columns.levels[0]}
-
             for s in batch:
-                if s not in data_dict or data_dict[s].empty or len(data_dict[s]) < 20:
-                    continue
+                # 確保該代碼有正確下載到數據
+                ticker_df = data[s] if len(batch) > 1 else data
+                if ticker_df.empty or len(ticker_df) < 20: continue
                 
-                df = data_dict[s].dropna()
-
-                # --- 你的條件判斷 ---
+                df = ticker_df.dropna()
+                
+                # --- 你的原始條件 ---
+                # 1. 量比 (5日均量 / 20日均量 > 1.85)
                 vol5 = df['Volume'].rolling(5).mean().iloc[-1]
                 vol20 = df['Volume'].rolling(20).mean().iloc[-1]
                 vol_ratio = vol5 / vol20
-
+                
+                # 2. 三日漲幅 > 20% 或 三天內兩根漲停
                 close_now = df['Close'].iloc[-1]
                 close_3 = df['Close'].iloc[-4]
                 return3 = (close_now - close_3) / close_3
@@ -62,9 +61,11 @@ def scan_in_batches(stock_list):
                 df['ret'] = df['Close'].pct_change()
                 limit_up_hits = (df['ret'] >= 0.098).rolling(3).sum().iloc[-1]
                 
+                # 3. K值 > 80 (KD 9,3,3)
                 stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=9, smooth_window=3)
                 k_val = stoch.stoch().iloc[-1]
-
+                
+                # 最終判斷
                 if vol_ratio > 1.85 and (return3 > 0.20 or limit_up_hits >= 2) and k_val > 80:
                     results.append({
                         "股票": s.replace(".TW", ""),
@@ -73,22 +74,25 @@ def scan_in_batches(stock_list):
                         "3日漲幅%": round(float(return3 * 100), 2),
                         "K值": round(float(k_val), 2)
                     })
-        except Exception:
-            continue
+        except: continue
+        
+    progress.empty()
     return pd.DataFrame(results)
 
-# 3. UI 呈現
+# 3. UI 介面
 st.title("🔥 全台股噴發掃描器")
-st.write(f"最後更新：{datetime.datetime.now().strftime('%H:%M:%S')}")
+st.write(f"系統時間: {datetime.datetime.now().strftime('%H:%M:%S')}")
 
-all_stocks = get_all_stocks()
-st.info(f"掃描範圍：全市場 {len(all_stocks)} 檔股票 (分批處理中...)")
+if st.button("開始執行全市場掃描"):
+    all_stocks = get_all_stocks()
+    st.info(f"正在掃描全市場 {len(all_stocks)} 檔股票...")
+    
+    df_res = run_scanner(all_stocks)
+    
+    if not df_res.empty:
+        st.success(f"找到 {len(df_res)} 檔符合條件標的")
+        st.dataframe(df_res.sort_values("量比", ascending=False), use_container_width=True)
+    else:
+        st.warning("目前全市場沒有標的同時滿足你的三大條件。")
 
-with st.spinner("正在執行掃描，請稍候..."):
-    df_result = scan_in_batches(all_stocks)
-
-if not df_result.empty:
-    st.success(f"找到 {len(df_result)} 檔符合條件標的")
-    st.dataframe(df_result.sort_values("量比", ascending=False), use_container_width=True)
-else:
-    st.warning("目前沒有符合所有條件的股票。")
+st.caption("註：你的條件非常精準且嚴格，掃不到股票屬於正常現象，代表目前市場沒有處於極端噴發狀態。")
