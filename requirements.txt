@@ -2,6 +2,7 @@ streamlit
 pandas
 yfinance
 ta
-lxml
 requests
-cryptography
+lxml
+html5lib
+BeautifulSoup4
