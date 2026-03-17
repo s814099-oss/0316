@@ -2,136 +2,152 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import time
+import random
 import requests
 import urllib3
-import random
 from ta.momentum import StochasticOscillator
+import plotly.graph_objects as go
 
-# 1. 核心設定：關閉 SSL 憑證警告（解決你之前的 SSL Error）
+# 禁用警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(layout="wide", page_title="台股飆股掃描器-精準版")
+st.set_page_config(layout="wide", page_title="台股飆股與突破掃描器")
 
+# ====== 取得上市櫃股票清單 ======
 @st.cache_data(ttl=86400)
 def get_all_tickers():
-    """精準抓取上市櫃名單，繞過憑證檢查"""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0'}
+    urls = {
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2": "TW",  # 上市
+        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4": "TWO"  # 上櫃
+    }
     all_tickers = []
-    
-    # A. 抓取上市清單 (TWSE) - 強制跳過 SSL 驗證
-    try:
-        twse_url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_AVG_ALL?response=json"
-        resp = requests.get(twse_url, headers=headers, verify=False, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json().get('data', [])
-            all_tickers.extend([f"{item[0]}.TW" for item in data if len(item[0]) == 4])
-    except Exception as e:
-        st.warning(f"上市清單抓取失敗（跳過）: {e}")
+    ticker_suffix = {}  # 存股票代號對應後綴
+    for url, suffix in urls.items():
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
+        df = pd.read_html(resp.text)[0]
+        symbols = df[df.iloc[:, 0].str.match(r'^\d{4}\s', na=False)].iloc[:, 0]
+        for s in symbols:
+            code = s.split()[0]
+            all_tickers.append(code)
+            ticker_suffix[code] = suffix
+    return list(set(all_tickers)), ticker_suffix
 
-    # B. 抓取上櫃清單 (TPEx) - 強制跳過 SSL 驗證
-    try:
-        tpex_url = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/otc_quotes_no1430_result.php?l=zh-tw"
-        resp = requests.get(tpex_url, headers=headers, verify=False, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json().get('aaData', [])
-            all_tickers.extend([f"{item[0]}.TWO" for item in data if len(item[0]) == 4])
-    except Exception as e:
-        st.warning(f"上櫃清單抓取失敗（跳過）: {e}")
-
-    # 如果都失敗，才使用保底清單
-    if not all_tickers:
-        return ["2330.TW", "2317.TW", "2454.TW", "2603.TW", "2303.TW", "2609.TW"]
-        
-    return list(set(all_tickers))
-
+# ====== 掃描全市場策略 ======
 def scan_full_market(all_tickers):
     results_3day = []
     results_6mo = []
-    
-    # 批次量設為 20，避免 Yahoo 偵測為攻擊
-    batch_size = 20
+    batch_size = 30
     batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
-    
     progress = st.progress(0)
-    status_text = st.empty()
-    
     for i, batch in enumerate(batches):
         progress.progress((i + 1) / len(batches))
-        status_text.text(f"掃描進度: {i+1}/{len(batches)} 批次 | 當前處理: {batch[0]}")
-        
         try:
-            # 下載數據，threads=True 加速
-            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True, progress=False, timeout=15)
-            
+            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', threads=True, progress=False)
             for ticker in batch:
-                # 確保有資料才處理
-                if ticker not in data or data[ticker].empty: continue
-                df = data[ticker]
-                if len(df) < 30: continue
-                
-                # --- 篩選邏輯：回溯 7 天尋找訊號 ---
+                df = data[ticker] if len(batch) > 1 else data
+                if df.empty or len(df) < 30: continue
                 for lookback in range(7):
                     idx = -(lookback + 1)
                     df_sub = df.iloc[:idx+1]
                     if len(df_sub) < 20: continue
-                    
-                    # 1. 量能過濾 (成交量 > 5000 張)
-                    vol_now = float(df_sub['Volume'].iloc[-1]) / 1000
-                    if vol_now < 5000: continue
-                    
-                    # 2. 技術指標計算 (量比與 K 值)
-                    ma5_v = df_sub['Volume'].rolling(5).mean().iloc[-1]
-                    ma20_v = df_sub['Volume'].rolling(20).mean().iloc[-1]
-                    vol_ratio = ma5_v / ma20_v if ma20_v > 0 else 0
-                    
+                    vol_in_thousands = float(df_sub['Volume'].iloc[-1]) / 1000
+                    if vol_in_thousands < 5000: continue
+                    ma5 = df_sub['Volume'].rolling(5, min_periods=1).mean().iloc[-1]
+                    ma20 = df_sub['Volume'].rolling(20, min_periods=1).mean().iloc[-1]
+                    vol_ratio = (ma5 / ma20) if ma20 > 0 else 0
                     stoch = StochasticOscillator(df_sub['High'], df_sub['Low'], df_sub['Close'], window=9, fillna=True)
-                    k_val = float(stoch.stoch().iloc[-1])
-                    
-                    # 策略門檻：K值 > 80 且量比 > 1.85
-                    if k_val > 80 and vol_ratio > 1.85:
-                        sig_date = df.index[idx].strftime('%Y-%m-%d')
-                        curr_price = round(float(df['Close'].iloc[-1]), 2)
-                        
-                        # A. 短線噴出 (3天 > 20%)
+                    k = float(stoch.stoch().iloc[-1])
+                    if vol_ratio > 1.85 and k > 80:
+                        signal_date = df.index[idx].strftime('%Y-%m-%d')
+                        latest_close = float(df['Close'].iloc[-1])
                         if idx <= -4:
-                            p_start = float(df['Close'].iloc[idx-3])
-                            gain = (float(df['Close'].iloc[idx]) - p_start) / p_start
-                            if gain > 0.20:
+                            prev_close = float(df['Close'].iloc[idx-3])
+                            three_day_gain = (float(df['Close'].iloc[idx]) - prev_close) / prev_close
+                            if three_day_gain > 0.20:
                                 results_3day.append({
-                                    "代號": ticker.split('.')[0], "訊號日": sig_date, 
-                                    "現價": curr_price, "3日漲幅": f"{gain:.1%}", 
-                                    "量比": round(vol_ratio, 2), "張數": int(vol_now)
+                                    "代號": ticker,
+                                    "訊號日期": signal_date,
+                                    "最新現價": round(latest_close, 2),
+                                    "漲幅": f"{three_day_gain:.1%}",
+                                    "量比": round(vol_ratio, 2),
+                                    "成交量(張)": int(vol_in_thousands)
                                 })
-                        
-                        # B. 中線突破 (半年高點)
-                        h_6m = df['Close'].rolling(120, min_periods=1).max().iloc[-1]
-                        if float(df['Close'].iloc[idx]) >= h_6m:
+                        six_mo_high = df['Close'].rolling(120, min_periods=1).max().iloc[-1]
+                        if float(df['Close'].iloc[idx]) >= six_mo_high:
                             results_6mo.append({
-                                "代號": ticker.split('.')[0], "訊號日": sig_date, 
-                                "現價": curr_price, "半年高點": round(h_6m, 2), 
-                                "量比": round(vol_ratio, 2), "張數": int(vol_now)
+                                "代號": ticker,
+                                "訊號日期": signal_date,
+                                "最新現價": round(latest_close, 2),
+                                "半年高點": round(six_mo_high, 2),
+                                "量比": round(vol_ratio, 2),
+                                "成交量(張)": int(vol_in_thousands)
                             })
-                        break 
-            # 增加隨機延遲保護 IP
-            time.sleep(random.uniform(1.5, 2.5))
+                        break
+            time.sleep(random.uniform(1, 2))
         except Exception:
             continue
-            
-    status_text.empty()
     return pd.DataFrame(results_3day), pd.DataFrame(results_6mo)
 
-# 3. 網頁 UI
-st.title("📊 台股飆股掃描器 (精準 API 版)")
-st.caption("自動繞過 SSL 驗證與頻率限制，掃描全台股上市櫃股票。")
+# ====== 畫 K 線圖 ======
+def plot_candlestick(ticker, suffix):
+    df = yf.download(f"{ticker}.{suffix}", period="6mo", interval="1d")
+    if df.empty:
+        return None
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index,
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close'],
+        increasing_line_color='green',
+        decreasing_line_color='red',
+        name=ticker
+    )])
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df['Volume']/1000,
+        marker_color='blue',
+        name='Volume',
+        yaxis='y2',
+        opacity=0.3
+    ))
+    fig.update_layout(
+        yaxis=dict(title='Price'),
+        yaxis2=dict(title='Volume (千張)', overlaying='y', side='right', showgrid=False),
+        xaxis=dict(title='Date'),
+        margin=dict(l=40, r=40, t=40, b=40),
+        legend=dict(orientation='h', y=-0.2)
+    )
+    return fig
+
+# ====== Streamlit UI ======
+st.title("📊 飆股策略精準掃描器")
 
 if st.button("啟動全市場掃描"):
-    with st.spinner("正在獲取最新清單並分析量能指標..."):
-        all_tickers = get_all_tickers()
-        df_3d, df_6m = scan_full_market(all_tickers)
-        
-        st.success(f"掃描完成！本次共分析 {len(all_tickers)} 檔有效標的。")
-        
-        t1, t2 = st.tabs(["🚀 短線強勢噴出", "📈 中線高點突破"])
-        with t1:
-            st.dataframe(df_3d, use_container_width=True)
-        with t2:
-            st.dataframe(df_6m, use_container_width=True)
+    with st.spinner("掃描中，請稍候..."):
+        all_tickers, ticker_suffix = get_all_tickers()
+        df_3day, df_6mo = scan_full_market(all_tickers)
+        st.success(f"✅ 掃描完成！總共處理 {len(all_tickers)} 檔股票。")
+
+        tab1, tab2 = st.tabs(["短線噴出", "半年新高"])
+
+        with tab1:
+            st.subheader("🚀 短線噴出 (3天漲幅 > 20%)")
+            st.dataframe(df_3day, use_container_width=True)
+            if not df_3day.empty:
+                selected_stock = st.selectbox("選擇股票查看K線", df_3day['代號'].tolist())
+                if selected_stock:
+                    suffix = ticker_suffix.get(selected_stock, "TW")
+                    fig = plot_candlestick(selected_stock, suffix)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+
+        with tab2:
+            st.subheader("📈 中線突破 (半年新高)")
+            st.dataframe(df_6mo, use_container_width=True)
+            if not df_6mo.empty:
+                selected_stock = st.selectbox("選擇股票查看K線 (半年新高)", df_6mo['代號'].tolist())
+                if selected_stock:
+                    suffix = ticker_suffix.get(selected_stock, "TW")
+                    fig = plot_candlestick(selected_stock, suffix)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
